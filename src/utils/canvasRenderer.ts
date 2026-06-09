@@ -32,6 +32,30 @@ export function canvasExportMmSize(
   }
 }
 
+export async function preloadImages(elements: CanvasElement[]): Promise<void> {
+  const images = elements.filter(e => e.type === 'image' && e.src)
+  if (images.length === 0) return
+  await Promise.all(
+    images.map(el => new Promise<void>((resolve) => {
+      const img = new Image()
+      img.onload = () => resolve()
+      img.onerror = () => resolve()
+      img.src = el.src!
+      if (img.complete) resolve()
+    }))
+  )
+}
+
+export async function renderElementsToCanvasAsync(
+  elements: CanvasElement[],
+  canvasState: CanvasState,
+  includeBleed: boolean = true,
+  bleedMm: number = 0
+): Promise<HTMLCanvasElement> {
+  await preloadImages(elements)
+  return renderElementsToCanvas(elements, canvasState, includeBleed, bleedMm)
+}
+
 export function renderElementsToCanvas(
   elements: CanvasElement[],
   canvasState: CanvasState,

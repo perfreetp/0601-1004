@@ -2,6 +2,7 @@ import { useState, useMemo, useRef, useEffect } from 'react'
 import { useDesignStore, replacePlaceholders } from '@/store/useDesignStore'
 import {
   renderElementsToCanvas,
+  renderElementsToCanvasAsync,
   canvasToPNG,
   canvasToJPG,
   saveOrDownload,
@@ -9,10 +10,11 @@ import {
   canvasExportPixelSize,
   canvasExportMmSize,
   generateBarcode,
+  preloadImages,
   BatchSaveItem,
 } from '@/utils/canvasRenderer'
 import { exportConfigToPDF, saveOrDownloadPDF } from '@/utils/pdfExporter'
-import type { CanvasElement, ExportConfig, DesignVersion } from '@/types'
+import type { CanvasElement, ExportConfig, DesignVersion, OrderItem } from '@/types'
 
 type ExportTaskStatus = 'pending' | 'processing' | 'done' | 'error'
 
@@ -21,10 +23,14 @@ interface ExportTask {
   filename: string
   format: 'png' | 'jpg' | 'pdf'
   orderNo?: string
+  order?: OrderItem
   status: ExportTaskStatus
   savedPath?: string | null
   error?: string
   createdAt: number
+  elements: CanvasElement[]
+  impositionOverride?: boolean
+  isMergedMultiPdf?: boolean
 }
 
 export default function ExportCenter() {
@@ -43,14 +49,23 @@ export default function ExportCenter() {
   const isProcessing = useRef(false)
   const bleedMm = exportConfig.bleed || 0
 
-  const finalPreviewDataUrl = useMemo(() => {
-    const renderState = { ...canvasState, exportDpi: exportConfig.dpi }
-    try {
-      const canvas = renderElementsToCanvas(elements, renderState, bleedMm > 0, bleedMm)
-      return canvas.toDataURL('image/png', 0.9)
-    } catch (e) {
-      console.warn('preview render failed', e)
-      return ''
+  const [previewDataUrl, setPreviewDataUrl] = useState<string>('')
+
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        await preloadImages(elements)
+        const renderState = { ...canvasState, exportDpi: exportConfig.dpi }
+        const canvas = renderElementsToCanvas(elements, renderState, bleedMm > 0, bleedMm)
+        if (!cancelled) setPreviewDataUrl(canvas.toDataURL('image/png', 0.9))
+      } catch (e) {
+        console.warn('preview render failed', e)
+        if (!cancelled) setPreviewDataUrl('')
+      }
+    })()
+    return () => {
+      cancelled = true
     }
   }, [elements, canvasState, exportConfig.dpi, bleedMm])
 
@@ -64,10 +79,29 @@ export default function ExportCenter() {
     ? exportConfig.impositionRows * exportConfig.impositionCols
     : 1
 
-  const addTask = (filename: string, format: 'png' | 'jpg' | 'pdf', orderNo?: string): string => {
+  const addTask = (params: {
+    filename: string
+    format: 'png' | 'jpg' | 'pdf'
+    orderNo?: string
+    order?: OrderItem
+    elements: CanvasElement[]
+    impositionOverride?: boolean
+    isMergedMultiPdf?: boolean
+  }): string => {
     const id = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     setTasks(prev => [
-      { id, filename, format, orderNo, status: 'pending', createdAt: Date.now() },
+      {
+        id,
+        filename: params.filename,
+        format: params.format,
+        orderNo: params.orderNo,
+        order: params.order,
+        status: 'pending',
+        createdAt: Date.now(),
+        elements: params.elements,
+        impositionOverride: params.impositionOverride,
+        isMergedMultiPdf: params.isMergedMultiPdf,
+      },
       ...prev,
     ])
     return id
@@ -81,15 +115,24 @@ export default function ExportCenter() {
     updateTask(task.id, { status: 'processing' })
     try {
       let dataUrl = ''
-      const config = exportConfig
+      const config: ExportConfig = {
+        ...exportConfig,
+        imposition: task.impositionOverride ?? exportConfig.imposition,
+      }
+      const renderState = { ...canvasState, exportDpi: config.dpi }
+
       if (task.format === 'pdf') {
-        dataUrl = exportConfigToPDF(elements, { ...canvasState, exportDpi: config.dpi }, config, orderItems, task.filename)
+        if (task.isMergedMultiPdf) {
+          dataUrl = await exportConfigToPDF(task.elements, renderState, config, orderItems, task.filename)
+        } else {
+          dataUrl = await exportConfigToPDF(task.elements, renderState, { ...config, pdfMode: config.imposition ? 'imposition' : 'single' }, [], task.filename)
+        }
       } else {
-        const renderState = { ...canvasState, exportDpi: config.dpi }
+        await preloadImages(task.elements)
         if (config.imposition) {
           const rows = config.impositionRows
           const cols = config.impositionCols
-          const single = renderElementsToCanvas(elements, renderState, bleedMm > 0, bleedMm)
+          const single = renderElementsToCanvas(task.elements, renderState, bleedMm > 0, bleedMm)
           const w = single.width
           const h = single.height
           const gap = Math.max(4, Math.round(4 * (config.dpi / 96)))
@@ -106,7 +149,7 @@ export default function ExportCenter() {
           }
           dataUrl = task.format === 'png' ? canvasToPNG(total) : canvasToJPG(total, config.quality / 100)
         } else {
-          const canvas = renderElementsToCanvas(elements, renderState, bleedMm > 0, bleedMm)
+          const canvas = renderElementsToCanvas(task.elements, renderState, bleedMm > 0, bleedMm)
           dataUrl = task.format === 'png' ? canvasToPNG(canvas) : canvasToJPG(canvas, config.quality / 100)
         }
       }
@@ -134,7 +177,11 @@ export default function ExportCenter() {
   }
 
   const handleSingleExport = () => {
-    addTask(buildFilename(), exportConfig.format)
+    addTask({
+      filename: buildFilename(),
+      format: exportConfig.format,
+      elements: [...elements],
+    })
     setActiveTab('queue')
   }
 
@@ -144,44 +191,97 @@ export default function ExportCenter() {
     const isMulti = exportConfig.pdfMode === 'multi'
 
     if (isPDF && isMulti) {
-      const filename = buildFilename(`batch_${orderItems.length}orders`, 'pdf')
-      addTask(filename, 'pdf')
+      addTask({
+        filename: buildFilename(`batch_${orderItems.length}orders`, 'pdf'),
+        format: 'pdf',
+        elements: [...elements],
+        isMergedMultiPdf: true,
+      })
       setActiveTab('queue')
       return
     }
 
-    if (isPDF) {
+    const hasElectronBatchSave =
+      typeof window !== 'undefined' &&
+      typeof (window as any).electronAPI !== 'undefined' &&
+      typeof (window as any).electronAPI.saveFiles === 'function'
+
+    if (hasElectronBatchSave && !isPDF) {
+      const batchItems: BatchSaveItem[] = []
+      const perOrder: { order: OrderItem; filename: string }[] = []
+      const renderState = { ...canvasState, exportDpi: exportConfig.dpi }
+
       for (const order of orderItems) {
-        const filename = buildFilename(`${order.orderNo}_${order.customerName}`, 'pdf')
-        addTask(filename, 'pdf', order.orderNo)
+        const replaced = replacePlaceholders(elements, order)
+        await preloadImages(replaced)
+        const canvas = renderElementsToCanvas(
+          replaced,
+          renderState,
+          bleedMm > 0,
+          bleedMm
+        )
+        const dataUrl =
+          exportConfig.format === 'png'
+            ? canvasToPNG(canvas)
+            : canvasToJPG(canvas, exportConfig.quality / 100)
+        const filename = buildFilename(`${order.orderNo}_${order.customerName}`)
+        batchItems.push({ filename, dataUrl })
+        perOrder.push({ order, filename })
       }
+
+      const folderTaskId = addTask({
+        filename: `batch_${orderItems.length}orders.${exportConfig.format}`,
+        format: exportConfig.format,
+        elements: [],
+      })
       setActiveTab('queue')
+      updateTask(folderTaskId, { status: 'processing' })
+      try {
+        const result = await saveOrDownloadBatch(batchItems)
+        updateTask(folderTaskId, {
+          status: result.saved > 0 ? 'done' : 'error',
+          savedPath: result.folder
+            ? `${result.folder} (${result.saved}/${batchItems.length})`
+            : `已下载 ${result.saved} 个文件`,
+          error: result.saved < batchItems.length ? `${batchItems.length - result.saved} 个文件失败` : undefined,
+        })
+      } catch (e: any) {
+        updateTask(folderTaskId, { status: 'error', error: e?.message || '批量导出失败' })
+      }
       return
     }
 
-    const batchItems: BatchSaveItem[] = []
-    const renderState = { ...canvasState, exportDpi: exportConfig.dpi }
     for (const order of orderItems) {
       const replaced = replacePlaceholders(elements, order)
-      const canvas = renderElementsToCanvas(replaced, renderState, bleedMm > 0, bleedMm)
-      const dataUrl = exportConfig.format === 'png' ? canvasToPNG(canvas) : canvasToJPG(canvas, exportConfig.quality / 100)
-      const filename = buildFilename(`${order.orderNo}_${order.customerName}`)
-      batchItems.push({ filename, dataUrl })
+      if (isPDF) {
+        addTask({
+          filename: buildFilename(`${order.orderNo}_${order.customerName}`, 'pdf'),
+          format: 'pdf',
+          orderNo: order.orderNo,
+          order,
+          elements: replaced,
+          impositionOverride: exportConfig.imposition,
+        })
+      } else {
+        addTask({
+          filename: buildFilename(`${order.orderNo}_${order.customerName}`),
+          format: exportConfig.format,
+          orderNo: order.orderNo,
+          order,
+          elements: replaced,
+          impositionOverride: exportConfig.imposition,
+        })
+      }
     }
-    const taskId = addTask(`batch_${orderItems.length}orders.${exportConfig.format}`, exportConfig.format)
     setActiveTab('queue')
-    updateTask(taskId, { status: 'processing' })
-    try {
-      const { saved, folder } = await saveOrDownloadBatch(batchItems)
-      updateTask(taskId, { status: 'done', savedPath: folder ? `${folder} (${saved}/${batchItems.length})` : `已下载 ${saved} 个文件` })
-    } catch (e: any) {
-      updateTask(taskId, { status: 'error', error: e?.message || '批量导出失败' })
-    }
   }
 
   const exportVersion = (version: DesignVersion) => {
-    const filename = buildFilename(`v${version.version}`)
-    addTask(filename, exportConfig.format)
+    addTask({
+      filename: buildFilename(`v${version.version}`),
+      format: exportConfig.format,
+      elements: version.elements.map(e => ({ ...e })),
+    })
     setActiveTab('queue')
   }
 
@@ -192,10 +292,7 @@ export default function ExportCenter() {
     const totalW = w * scale + bleedPx * 2
     const totalH = h * scale + bleedPx * 2
     return (
-      <div
-        className="relative bg-white border"
-        style={{ width: totalW, height: totalH }}
-      >
+      <div className="relative bg-white border" style={{ width: totalW, height: totalH }}>
         {bleedPx > 0 && (
           <div
             className="absolute border-2 border-dashed border-red-400 pointer-events-none"
@@ -204,7 +301,7 @@ export default function ExportCenter() {
         )}
         {[...els]
           .sort((a, b) => a.zIndex - b.zIndex)
-          .map((element) => {
+          .map(element => {
             const baseStyle: React.CSSProperties = {
               position: 'absolute',
               left: bleedPx + element.x * scale,
@@ -228,7 +325,11 @@ export default function ExportCenter() {
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent:
-                      element.textAlign === 'center' ? 'center' : element.textAlign === 'right' ? 'flex-end' : 'flex-start',
+                      element.textAlign === 'center'
+                        ? 'center'
+                        : element.textAlign === 'right'
+                        ? 'flex-end'
+                        : 'flex-start',
                     textAlign: (element.textAlign as any) || 'center',
                   }}
                 >
@@ -257,11 +358,10 @@ export default function ExportCenter() {
               )
               const dataUrl = canvas ? canvas.toDataURL() : ''
               return (
-                <div
-                  key={element.id}
-                  style={{ ...baseStyle, backgroundColor: '#fff', overflow: 'hidden' }}
-                >
-                  {dataUrl && <img src={dataUrl} alt="" style={{ width: '100%', height: '100%', objectFit: 'fill' }} />}
+                <div key={element.id} style={{ ...baseStyle, backgroundColor: '#fff', overflow: 'hidden' }}>
+                  {dataUrl && (
+                    <img src={dataUrl} alt="" style={{ width: '100%', height: '100%', objectFit: 'fill' }} />
+                  )}
                 </div>
               )
             }
@@ -281,6 +381,8 @@ export default function ExportCenter() {
     )
   }
 
+  const DPI_PRESETS = [72, 150, 300, 600]
+
   return (
     <div className="h-full flex flex-col">
       <header className="px-8 py-6 border-b border-dark-700 bg-dark-900/50">
@@ -290,7 +392,8 @@ export default function ExportCenter() {
             <p className="text-slate-400 mt-1">
               最终文件预览 · DPI {exportConfig.dpi} · 出血 {bleedMm}mm ·{' '}
               {exportConfig.format.toUpperCase()}
-              {exportConfig.format === 'pdf' && ` (${exportConfig.pdfMode === 'multi' ? '多页合并' : exportConfig.pdfMode === 'imposition' ? '拼版' : '单页'})`}
+              {exportConfig.format === 'pdf' &&
+                ` (${exportConfig.pdfMode === 'multi' ? '多页合并' : exportConfig.pdfMode === 'imposition' ? '拼版' : '单页'})`}
             </p>
           </div>
           <div className="flex items-center gap-1 bg-dark-800 rounded-lg p-1 border border-dark-700">
@@ -309,11 +412,12 @@ export default function ExportCenter() {
                 }`}
               >
                 {tab.label}
-                {tab.v === 'queue' && tasks.some(t => t.status === 'pending' || t.status === 'processing') && (
-                  <span className="ml-1.5 inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 text-[10px] text-white">
-                    {tasks.filter(t => t.status === 'pending' || t.status === 'processing').length}
-                  </span>
-                )}
+                {tab.v === 'queue' &&
+                  tasks.some(t => t.status === 'pending' || t.status === 'processing') && (
+                    <span className="ml-1.5 inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 text-[10px] text-white">
+                      {tasks.filter(t => t.status === 'pending' || t.status === 'processing').length}
+                    </span>
+                  )}
               </button>
             ))}
           </div>
@@ -335,9 +439,9 @@ export default function ExportCenter() {
                   </span>
                 </div>
                 <div className="bg-dark-700/50 rounded-xl p-6 flex items-center justify-center overflow-auto min-h-[400px]">
-                  {finalPreviewDataUrl ? (
+                  {previewDataUrl ? (
                     <img
-                      src={finalPreviewDataUrl}
+                      src={previewDataUrl}
                       alt="最终预览"
                       className="max-w-full max-h-[70vh] shadow-2xl rounded"
                       style={{ imageRendering: 'auto' }}
@@ -383,7 +487,14 @@ export default function ExportCenter() {
                   </span>
                   <span>批量订单: {orderItems.length > 0 ? `${orderItems.length} 份` : '未导入'}</span>
                   {exportConfig.format === 'pdf' && (
-                    <span>PDF 模式: {exportConfig.pdfMode === 'multi' ? '按订单合并多页' : exportConfig.pdfMode === 'imposition' ? '拼版' : '单页'}</span>
+                    <span>
+                      PDF 模式:{' '}
+                      {exportConfig.pdfMode === 'multi'
+                        ? '按订单合并多页'
+                        : exportConfig.pdfMode === 'imposition'
+                        ? '拼版'
+                        : '单页'}
+                    </span>
                   )}
                 </div>
               </div>
@@ -391,9 +502,10 @@ export default function ExportCenter() {
               <div className="flex justify-end gap-3">
                 <button
                   className="btn-secondary"
-                  onClick={() => {
+                  onClick={async () => {
                     const config: ExportConfig = { ...exportConfig, dpi: 150, bleed: 0 }
                     const renderState = { ...canvasState, exportDpi: 150 }
+                    await preloadImages(elements)
                     const canvas = renderElementsToCanvas(elements, renderState, false, 0)
                     saveOrDownload(canvasToPNG(canvas), 'quick-preview.png')
                   }}
@@ -477,15 +589,25 @@ export default function ExportCenter() {
                       type="range"
                       min={72}
                       max={600}
-                      step={72}
+                      step={1}
                       value={exportConfig.dpi}
                       onChange={e => setExportConfig({ dpi: Number(e.target.value) })}
                       className="w-full accent-primary-500"
                     />
-                    <div className="flex justify-between text-xs text-slate-600 mt-1">
-                      <span>72</span>
-                      <span>300</span>
-                      <span>600</span>
+                    <div className="flex gap-1 mt-2">
+                      {DPI_PRESETS.map(d => (
+                        <button
+                          key={d}
+                          onClick={() => setExportConfig({ dpi: d })}
+                          className={`flex-1 py-1.5 text-xs rounded transition-colors ${
+                            exportConfig.dpi === d
+                              ? 'bg-primary-600 text-white'
+                              : 'bg-dark-800 text-slate-400 hover:bg-dark-700 hover:text-slate-200'
+                          }`}
+                        >
+                          {d}
+                        </button>
+                      ))}
                     </div>
                   </div>
 
@@ -707,6 +829,9 @@ export default function ExportCenter() {
                         </span>
                         {task.orderNo && (
                           <span className="text-xs text-slate-500">#{task.orderNo}</span>
+                        )}
+                        {task.order && (
+                          <span className="text-xs text-slate-500">{task.order.customerName}</span>
                         )}
                       </div>
                       <div className="text-xs mt-1">

@@ -1,14 +1,15 @@
 import { jsPDF } from 'jspdf'
 import type { CanvasElement, CanvasState, ExportConfig, OrderItem } from '@/types'
-import { renderElementsToCanvas, saveOrDownload, canvasExportMmSize } from './canvasRenderer'
+import { renderElementsToCanvas, saveOrDownload, canvasExportMmSize, preloadImages } from './canvasRenderer'
 import { replacePlaceholders } from '@/store/useDesignStore'
 
-export function exportDesignToPDF(
+export async function exportDesignToPDF(
   elements: CanvasElement[],
   canvasState: CanvasState,
   config: ExportConfig,
   _filename: string = 'design.pdf'
-): string {
+): Promise<string> {
+  await preloadImages(elements)
   const bleedMm = config.bleed || 0
   const { widthMm, heightMm } = canvasExportMmSize(canvasState, bleedMm)
   const orientation = widthMm > heightMm ? 'landscape' : 'portrait'
@@ -28,12 +29,13 @@ export function exportDesignToPDF(
   return pdf.output('datauristring') as string
 }
 
-export function exportImpositionToPDF(
+export async function exportImpositionToPDF(
   elements: CanvasElement[],
   canvasState: CanvasState,
   config: ExportConfig,
   _filename: string = 'design-imposition.pdf'
-): string {
+): Promise<string> {
+  await preloadImages(elements)
   const rows = config.impositionRows || 2
   const cols = config.impositionCols || 3
   const bleedMm = config.bleed || 0
@@ -64,17 +66,18 @@ export function exportImpositionToPDF(
   return pdf.output('datauristring') as string
 }
 
-export function exportMultiOrderToPDF(
-  elements: CanvasElement[],
+export async function exportMultiOrderToPDF(
+  templateElements: CanvasElement[],
   canvasState: CanvasState,
   config: ExportConfig,
   orders: OrderItem[],
   _filename: string = 'batch-orders.pdf'
-): string {
+): Promise<string> {
   if (!orders || orders.length === 0) {
-    return exportDesignToPDF(elements, canvasState, config, _filename)
+    return exportDesignToPDF(templateElements, canvasState, config, _filename)
   }
 
+  await preloadImages(templateElements)
   const bleedMm = config.bleed || 0
   const { widthMm, heightMm } = canvasExportMmSize(canvasState, bleedMm)
   const orientation = widthMm > heightMm ? 'landscape' : 'portrait'
@@ -89,7 +92,8 @@ export function exportMultiOrderToPDF(
 
   for (let i = 0; i < orders.length; i++) {
     const order = orders[i]
-    const replaced = replacePlaceholders(elements, order)
+    const replaced = replacePlaceholders(templateElements, order)
+    await preloadImages(replaced)
     const canvas = renderElementsToCanvas(replaced, renderState, bleedMm > 0, bleedMm)
     const imgData = canvas.toDataURL('image/png')
 
@@ -100,13 +104,13 @@ export function exportMultiOrderToPDF(
   return pdf.output('datauristring') as string
 }
 
-export function exportConfigToPDF(
+export async function exportConfigToPDF(
   elements: CanvasElement[],
   canvasState: CanvasState,
   config: ExportConfig,
   orders: OrderItem[] = [],
   filename = 'design.pdf'
-): string {
+): Promise<string> {
   if (config.format !== 'pdf') {
     throw new Error('config.format must be pdf')
   }
