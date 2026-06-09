@@ -1,6 +1,8 @@
-import { useState } from 'react'
-import { useDesignStore } from '@/store/useDesignStore'
-import type { OrderItem } from '@/types'
+import { useState, useRef, useEffect } from 'react'
+import { useDesignStore, replacePlaceholders } from '@/store/useDesignStore'
+import { generateBarcode } from '@/utils/canvasRenderer'
+import { renderElementsToCanvas, canvasToPNG, downloadDataURL } from '@/utils/canvasRenderer'
+import type { OrderItem, CanvasElement } from '@/types'
 
 const sampleOrders: OrderItem[] = [
   { id: '1', orderNo: 'DD20240201001', customerName: '张小明', productName: '手工香薰蜡烛', quantity: 2 },
@@ -11,9 +13,25 @@ const sampleOrders: OrderItem[] = [
 ]
 
 export default function BatchGenerator() {
-  const { orderItems, importOrderItems, elements } = useDesignStore()
+  const { orderItems, importOrderItems, elements, addElement, canvasState } = useDesignStore()
   const [barcodeValue, setBarcodeValue] = useState('123456789012')
   const [barcodeFormat, setBarcodeFormat] = useState('CODE128')
+  const [previewOrder, setPreviewOrder] = useState<OrderItem | null>(null)
+  const [generating, setGenerating] = useState(false)
+  const barcodeContainerRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!barcodeContainerRef.current) return
+    barcodeContainerRef.current.innerHTML = ''
+    const canvas = generateBarcode(barcodeValue, barcodeFormat, 320, 100)
+    if (canvas) {
+      canvas.style.maxWidth = '100%'
+      canvas.style.height = 'auto'
+      barcodeContainerRef.current.appendChild(canvas)
+    } else {
+      barcodeContainerRef.current.innerHTML = '<span class="text-sm text-red-400">条码内容无效</span>'
+    }
+  }, [barcodeValue, barcodeFormat])
 
   const handleImportSample = () => {
     importOrderItems(sampleOrders)
@@ -44,6 +62,39 @@ export default function BatchGenerator() {
     }
   }
 
+  const handleInsertBarcode = () => {
+    const newElement: CanvasElement = {
+      id: `barcode-${Date.now()}`,
+      type: 'barcode',
+      x: 50,
+      y: 50,
+      width: 200,
+      height: 80,
+      rotation: 0,
+      zIndex: elements.length,
+      barcodeValue,
+      barcodeFormat,
+    }
+    addElement(newElement)
+  }
+
+  const handleBatchGenerate = async () => {
+    if (orderItems.length === 0) {
+      alert('请先导入订单数据')
+      return
+    }
+    setGenerating(true)
+    for (let i = 0; i < orderItems.length; i++) {
+      const order = orderItems[i]
+      const replacedElements = replacePlaceholders(elements, order)
+      const canvas = renderElementsToCanvas(replacedElements, canvasState, true)
+      const dataURL = canvasToPNG(canvas)
+      downloadDataURL(dataURL, `${order.orderNo}_${order.customerName}.png`)
+      await new Promise(r => setTimeout(r, 200))
+    }
+    setGenerating(false)
+  }
+
   const placeholders = new Set<string>()
   elements.forEach(e => {
     if (e.type === 'text' && e.content) {
@@ -67,8 +118,12 @@ export default function BatchGenerator() {
             <button className="btn-secondary" onClick={handleImportSample}>
               📋 导入示例数据
             </button>
-            <button className="btn-primary">
-              🚀 开始批量生成
+            <button
+              className="btn-primary"
+              onClick={handleBatchGenerate}
+              disabled={generating}
+            >
+              {generating ? '⏳ 生成中...' : '🚀 开始批量生成'}
             </button>
           </div>
         </div>
@@ -109,7 +164,7 @@ export default function BatchGenerator() {
                     <th className="text-left px-6 py-3 text-xs font-medium text-slate-400 uppercase tracking-wider">客户姓名</th>
                     <th className="text-left px-6 py-3 text-xs font-medium text-slate-400 uppercase tracking-wider">商品名称</th>
                     <th className="text-left px-6 py-3 text-xs font-medium text-slate-400 uppercase tracking-wider">数量</th>
-                    <th className="text-left px-6 py-3 text-xs font-medium text-slate-400 uppercase tracking-wider">预览替换</th>
+                    <th className="text-left px-6 py-3 text-xs font-medium text-slate-400 uppercase tracking-wider">操作</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-dark-700">
@@ -121,7 +176,12 @@ export default function BatchGenerator() {
                       <td className="px-6 py-3 text-sm text-slate-200">{item.productName}</td>
                       <td className="px-6 py-3 text-sm text-slate-200">×{item.quantity}</td>
                       <td className="px-6 py-3">
-                        <button className="text-primary-400 hover:text-primary-300 text-sm">预览</button>
+                        <button
+                          className="text-primary-400 hover:text-primary-300 text-sm"
+                          onClick={() => setPreviewOrder(item)}
+                        >
+                          预览
+                        </button>
                       </td>
                     </tr>
                   ))}
@@ -143,7 +203,7 @@ export default function BatchGenerator() {
                   value={barcodeValue}
                   onChange={(e) => setBarcodeValue(e.target.value)}
                   className="input-field"
-                  placeholder="输入条码内容"
+                  placeholder="输入条码内容，支持 {{orderNo}}"
                 />
               </div>
 
@@ -161,29 +221,14 @@ export default function BatchGenerator() {
                   <option value="CODE39">CODE39</option>
                   <option value="ITF14">ITF-14</option>
                   <option value="MSI">MSI</option>
-                  <option value="pharmacode">Pharmacode</option>
                 </select>
               </div>
 
-              <div className="card p-4 flex items-center justify-center bg-dark-800">
-                <svg width="200" height="60" viewBox="0 0 200 60">
-                  {Array.from({ length: 50 }).map((_, i) => (
-                    <rect
-                      key={i}
-                      x={10 + i * 3.6}
-                      y={10}
-                      width={i % 3 === 0 ? 2.5 : 1.2}
-                      height={35}
-                      fill={i % 2 === 0 ? '#1e293b' : 'transparent'}
-                    />
-                  ))}
-                  <text x="100" y="55" textAnchor="middle" fontSize="10" fill="#64748b" fontFamily="monospace">
-                    {barcodeValue}
-                  </text>
-                </svg>
+              <div className="card p-4 flex items-center justify-center bg-white min-h-[100px]">
+                <div ref={barcodeContainerRef} className="w-full flex items-center justify-center" />
               </div>
 
-              <button className="w-full btn-primary justify-center">
+              <button className="w-full btn-primary justify-center" onClick={handleInsertBarcode}>
                 ➕ 插入到画布
               </button>
             </div>
@@ -200,7 +245,7 @@ export default function BatchGenerator() {
                     </code>
                     <span className="text-xs text-slate-500">→</span>
                     <span className="text-xs text-slate-400">
-                      {placeholder === '{{name}}' ? '客户姓名' : placeholder === '{{orderNo}}' ? '订单号' : '自定义字段'}
+                      {placeholder === '{{name}}' ? '客户姓名' : placeholder === '{{orderNo}}' ? '订单号' : placeholder === '{{productName}}' ? '商品名称' : '自定义字段'}
                     </span>
                   </div>
                   <p className="text-xs text-slate-500">将自动从订单数据中匹配对应字段</p>
@@ -215,6 +260,150 @@ export default function BatchGenerator() {
           </div>
         </aside>
       </div>
+
+      {previewOrder && (
+        <div
+          className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-8"
+          onClick={() => setPreviewOrder(null)}
+        >
+          <div
+            className="card p-6 max-w-2xl w-full max-h-full overflow-auto"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h3 className="text-lg font-bold text-white">
+                  订单预览 - {previewOrder.customerName}
+                </h3>
+                <p className="text-sm text-slate-400 mt-0.5">
+                  订单号: {previewOrder.orderNo} · {previewOrder.productName} ×{previewOrder.quantity}
+                </p>
+              </div>
+              <button
+                className="w-8 h-8 rounded-full bg-dark-700 hover:bg-dark-600 text-slate-300 flex items-center justify-center"
+                onClick={() => setPreviewOrder(null)}
+              >
+                ×
+              </button>
+            </div>
+            <div className="bg-slate-100 rounded-lg p-6 flex items-center justify-center">
+              <OrderPreview order={previewOrder} />
+            </div>
+            <div className="flex justify-end gap-2 mt-4">
+              <button
+                className="btn-primary"
+                onClick={() => {
+                  const replaced = replacePlaceholders(elements, previewOrder)
+                  const cvs = renderElementsToCanvas(replaced, canvasState, true)
+                  downloadDataURL(canvasToPNG(cvs), `${previewOrder.orderNo}_${previewOrder.customerName}.png`)
+                }}
+              >
+                📥 下载此订单
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function OrderPreview({ order }: { order: OrderItem }) {
+  const { elements, canvasState } = useDesignStore()
+  const replaced = replacePlaceholders(elements, order)
+  const previewScale = 0.6
+
+  return (
+    <div
+      className="relative shadow-xl"
+      style={{
+        width: canvasState.width * previewScale,
+        height: canvasState.height * previewScale,
+        backgroundColor: canvasState.backgroundColor,
+      }}
+    >
+      {[...replaced]
+        .sort((a, b) => a.zIndex - b.zIndex)
+        .map((element) => {
+          const baseStyle: React.CSSProperties = {
+            position: 'absolute',
+            left: element.x * previewScale,
+            top: element.y * previewScale,
+            width: element.width * previewScale,
+            height: element.height * previewScale,
+            transform: `rotate(${element.rotation}deg)`,
+            zIndex: element.zIndex,
+          }
+
+          if (element.type === 'text') {
+            return (
+              <div
+                key={element.id}
+                style={{
+                  ...baseStyle,
+                  fontSize: (element.fontSize || 16) * previewScale,
+                  fontFamily: element.fontFamily,
+                  fontWeight: element.fontWeight,
+                  color: element.color,
+                  whiteSpace: 'pre-wrap',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  textAlign: 'center',
+                }}
+              >
+                {element.content}
+              </div>
+            )
+          }
+          if (element.type === 'shape') {
+            return (
+              <div
+                key={element.id}
+                style={{
+                  ...baseStyle,
+                  backgroundColor: element.fill,
+                  borderRadius: element.shapeType === 'circle' ? '50%' : 0,
+                }}
+              />
+            )
+          }
+          if (element.type === 'image') {
+            return (
+              <img
+                key={element.id}
+                src={element.src}
+                alt=""
+                style={{ ...baseStyle, objectFit: 'contain' }}
+              />
+            )
+          }
+          if (element.type === 'barcode') {
+            const canvas = generateBarcode(
+              element.barcodeValue || '',
+              element.barcodeFormat || 'CODE128',
+              element.width * previewScale,
+              element.height * previewScale
+            )
+            const dataUrl = canvas ? canvas.toDataURL() : ''
+            return (
+              <div
+                key={element.id}
+                style={{
+                  ...baseStyle,
+                  backgroundColor: '#fff',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  overflow: 'hidden',
+                }}
+              >
+                {dataUrl && <img src={dataUrl} alt="barcode" style={{ width: '100%', height: '100%', objectFit: 'fill' }} />}
+              </div>
+            )
+          }
+          return null
+        })}
     </div>
   )
 }

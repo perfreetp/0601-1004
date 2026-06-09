@@ -102,4 +102,10 @@ export interface CanvasState {
   showGrid: boolean
   gridSize: number
   backgroundColor: string
+  exportDpi?: number
+}
+
+export interface HistorySnapshot {
+  elements: CanvasElement[]
+  canvasState: CanvasState
 }

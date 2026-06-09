@@ -5,7 +5,7 @@ import type { Template } from '@/types'
 
 export default function TemplateSquare() {
   const navigate = useNavigate()
-  const { templates, toggleFavoriteTemplate, setSelectedTemplate } = useDesignStore()
+  const { templates, toggleFavoriteTemplate, setSelectedTemplate, createBlankTemplate } = useDesignStore()
   const [category, setCategory] = useState<'all' | 'box-sticker' | 'thank-you-card'>('all')
   const [showFavorites, setShowFavorites] = useState(false)
   const [searchTerm, setSearchTerm] = useState('')
@@ -22,6 +22,11 @@ export default function TemplateSquare() {
     navigate('/editor')
   }
 
+  const handleCreateBlank = () => {
+    createBlankTemplate()
+    navigate('/editor')
+  }
+
   return (
     <div className="h-full flex flex-col overflow-hidden">
       <header className="px-8 py-6 border-b border-dark-700 bg-dark-900/50">
@@ -30,7 +35,7 @@ export default function TemplateSquare() {
             <h2 className="text-2xl font-bold text-white">模板广场</h2>
             <p className="text-slate-400 mt-1">精选盒贴与感谢卡模板，快速开始你的设计</p>
           </div>
-          <button className="btn-primary">
+          <button className="btn-primary" onClick={handleCreateBlank}>
             <span>+</span> 新建空白模板
           </button>
         </div>
@@ -99,6 +104,7 @@ export default function TemplateSquare() {
                     toggleFavoriteTemplate(template.id)
                   }}
                   className="absolute top-3 right-3 w-8 h-8 rounded-full bg-black/40 backdrop-blur-sm flex items-center justify-center text-lg hover:bg-black/60 transition-colors"
+                  title={template.isFavorite ? '取消收藏' : '收藏'}
                 >
                   {template.isFavorite ? '⭐' : '☆'}
                 </button>
@@ -119,7 +125,10 @@ export default function TemplateSquare() {
                   >
                     使用模板
                   </button>
-                  <button className="btn-secondary !px-4">
+                  <button
+                    className="btn-secondary !px-4"
+                    onClick={() => handleUseTemplate(template)}
+                  >
                     预览
                   </button>
                 </div>

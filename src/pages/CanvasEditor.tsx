@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { useDesignStore } from '@/store/useDesignStore'
+import { generateBarcode } from '@/utils/canvasRenderer'
 import type { CanvasElement } from '@/types'
 
 export default function CanvasEditor() {
@@ -15,11 +16,25 @@ export default function CanvasEditor() {
     setSelectedElementId,
     colorSchemes,
     applyColorScheme,
+    undo,
+    redo,
+    canUndo,
+    canRedo,
+    saveDesign,
+    restoreSavedDesign,
+    _pushHistory,
   } = useDesignStore()
 
   const [dragging, setDragging] = useState<string | null>(null)
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 })
+  const [saveMessage, setSaveMessage] = useState<string | null>(null)
   const canvasRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (elements.length === 0 && !selectedTemplate) {
+      restoreSavedDesign()
+    }
+  }, [])
 
   const selectedElement = elements.find((e) => e.id === selectedElementId)
 
@@ -32,7 +47,7 @@ export default function CanvasEditor() {
   const handleElementMouseDown = (e: React.MouseEvent, element: CanvasElement) => {
     e.stopPropagation()
     setSelectedElementId(element.id)
-    const rect = (e.target as HTMLElement).getBoundingClientRect()
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
     setDragging(element.id)
     setDragOffset({
       x: e.clientX - rect.left,
@@ -48,11 +63,20 @@ export default function CanvasEditor() {
     updateElement(dragging, {
       x: Math.max(0, Math.min(newX, canvasState.width - 50)),
       y: Math.max(0, Math.min(newY, canvasState.height - 20)),
-    })
+    }, false)
   }
 
   const handleMouseUp = () => {
+    if (dragging) {
+      _pushHistory()
+    }
     setDragging(null)
+  }
+
+  const handleSave = () => {
+    const savedAt = saveDesign()
+    setSaveMessage(`已保存 ${new Date(savedAt).toLocaleTimeString('zh-CN')}`)
+    setTimeout(() => setSaveMessage(null), 2000)
   }
 
   const addTextElement = () => {
@@ -92,18 +116,91 @@ export default function CanvasEditor() {
   }
 
   const addImageElement = () => {
+    const input = document.createElement('input')
+    input.type = 'file'
+    input.accept = 'image/*'
+    input.onchange = (ev) => {
+      const file = (ev.target as HTMLInputElement).files?.[0]
+      if (!file) return
+      const reader = new FileReader()
+      reader.onload = () => {
+        const result = reader.result as string
+        const img = new Image()
+        img.onload = () => {
+          const newElement: CanvasElement = {
+            id: `img-${Date.now()}`,
+            type: 'image',
+            x: 50,
+            y: 50,
+            width: Math.min(img.width, 200),
+            height: Math.min(img.height, 200),
+            rotation: 0,
+            zIndex: elements.length,
+            src: result,
+          }
+          addElement(newElement)
+        }
+        img.src = result
+      }
+      reader.readAsDataURL(file)
+    }
+    input.click()
+  }
+
+  const addBarcodeElement = () => {
     const newElement: CanvasElement = {
-      id: `img-${Date.now()}`,
-      type: 'image',
+      id: `barcode-${Date.now()}`,
+      type: 'barcode',
       x: 50,
       y: 50,
-      width: 120,
-      height: 120,
+      width: 200,
+      height: 80,
       rotation: 0,
       zIndex: elements.length,
-      src: 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTIwIiBoZWlnaHQ9IjEyMCIgdmlld0JveD0iMCAwIDEyMCAxMjAiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHJlY3Qgd2lkdGg9IjEyMCIgaGVpZ2h0PSIxMjAiIGZpbGw9IiMzMzQxNTUiLz48dGV4dCB4PSI2MCIgeT0iNjgiIGZvbnQtZmFtaWx5PSJzYW5zLXNlcmlmIiBmb250LXNpemU9IjQwIiBmaWxsPSIjOTRhM2I4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj7wn5SkPC90ZXh0Pjwvc3ZnPg==',
+      barcodeValue: '{{orderNo}}',
+      barcodeFormat: 'CODE128',
     }
     addElement(newElement)
+  }
+
+  const renderBarcode = (element: CanvasElement, isSelected: boolean): React.ReactNode => {
+    const canvas = generateBarcode(
+      element.barcodeValue || '',
+      element.barcodeFormat || 'CODE128',
+      element.width * canvasState.zoom,
+      element.height * canvasState.zoom
+    )
+    const dataUrl = canvas ? canvas.toDataURL('image/png') : ''
+    return (
+      <div
+        key={element.id}
+        style={{
+          position: 'absolute',
+          left: element.x * canvasState.zoom,
+          top: element.y * canvasState.zoom,
+          width: element.width * canvasState.zoom,
+          height: element.height * canvasState.zoom,
+          transform: `rotate(${element.rotation}deg)`,
+          cursor: 'move',
+          outline: isSelected ? '2px solid #a855f7' : 'none',
+          outlineOffset: '2px',
+          zIndex: element.zIndex,
+          boxSizing: 'border-box',
+          backgroundColor: '#fff',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          overflow: 'hidden',
+        }}
+        onMouseDown={(e) => handleElementMouseDown(e, element)}
+      >
+        {dataUrl ? (
+          <img src={dataUrl} alt="barcode" style={{ width: '100%', height: '100%', objectFit: 'fill' }} />
+        ) : (
+          <span className="text-xs text-slate-400">条码无效</span>
+        )}
+      </div>
+    )
   }
 
   const renderElement = (element: CanvasElement) => {
@@ -120,6 +217,10 @@ export default function CanvasEditor() {
       outlineOffset: '2px',
       zIndex: element.zIndex,
       boxSizing: 'border-box',
+    }
+
+    if (element.type === 'barcode') {
+      return renderBarcode(element, isSelected)
     }
 
     if (element.type === 'text') {
@@ -195,20 +296,33 @@ export default function CanvasEditor() {
               当前模板: {selectedTemplate.name}
             </span>
           )}
-          {!selectedTemplate && (
+          {!selectedTemplate && elements.length === 0 && (
             <span className="px-3 py-1 bg-dark-800 border border-dashed border-dark-600 rounded-full text-sm text-slate-500">
               空白画布 - 可从模板广场选择模板
             </span>
           )}
+          {saveMessage && (
+            <span className="px-3 py-1 bg-green-600/20 text-green-400 rounded-full text-sm animate-pulse">
+              ✓ {saveMessage}
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2">
-          <button className="btn-secondary">
+          <button
+            className={`btn-secondary ${!canUndo ? 'opacity-50 cursor-not-allowed' : ''}`}
+            onClick={undo}
+            disabled={!canUndo}
+          >
             ↶ 撤销
           </button>
-          <button className="btn-secondary">
+          <button
+            className={`btn-secondary ${!canRedo ? 'opacity-50 cursor-not-allowed' : ''}`}
+            onClick={redo}
+            disabled={!canRedo}
+          >
             ↷ 重做
           </button>
-          <button className="btn-primary">
+          <button className="btn-primary" onClick={handleSave}>
             💾 保存
           </button>
         </div>
@@ -220,7 +334,7 @@ export default function CanvasEditor() {
           <ToolButton icon="⬜" label="矩形" onClick={() => addShapeElement('rect')} />
           <ToolButton icon="⭕" label="圆形" onClick={() => addShapeElement('circle')} />
           <ToolButton icon="🖼️" label="图片" onClick={addImageElement} />
-          <ToolButton icon="📱" label="条码" onClick={() => {}} />
+          <ToolButton icon="📱" label="条码" onClick={addBarcodeElement} />
           <div className="flex-1" />
           <ToolButton
             icon="🔍+"
@@ -262,7 +376,6 @@ export default function CanvasEditor() {
 
             {canvasState.showGrid && (
               <div
-                ref={canvasRef}
                 className="absolute inset-0 pointer-events-none"
                 style={{
                   backgroundImage: `linear-gradient(to right, #ccc 1px, transparent 1px), linear-gradient(to bottom, #ccc 1px, transparent 1px)`,
@@ -293,7 +406,7 @@ export default function CanvasEditor() {
                   <input
                     type="number"
                     value={canvasState.width}
-                    onChange={(e) => updateCanvasState({ width: Number(e.target.value) })}
+                    onChange={(e) => updateCanvasState({ width: Number(e.target.value) }, true)}
                     className="input-field !py-1.5 text-sm"
                   />
                 </div>
@@ -302,7 +415,7 @@ export default function CanvasEditor() {
                   <input
                     type="number"
                     value={canvasState.height}
-                    onChange={(e) => updateCanvasState({ height: Number(e.target.value) })}
+                    onChange={(e) => updateCanvasState({ height: Number(e.target.value) }, true)}
                     className="input-field !py-1.5 text-sm"
                   />
                 </div>
@@ -314,13 +427,13 @@ export default function CanvasEditor() {
                   <input
                     type="color"
                     value={canvasState.backgroundColor}
-                    onChange={(e) => updateCanvasState({ backgroundColor: e.target.value })}
+                    onChange={(e) => updateCanvasState({ backgroundColor: e.target.value }, true)}
                     className="w-10 h-10 rounded cursor-pointer bg-transparent border border-dark-600"
                   />
                   <input
                     type="text"
                     value={canvasState.backgroundColor}
-                    onChange={(e) => updateCanvasState({ backgroundColor: e.target.value })}
+                    onChange={(e) => updateCanvasState({ backgroundColor: e.target.value }, true)}
                     className="input-field flex-1 !py-1.5 text-sm"
                   />
                 </div>
@@ -443,7 +556,36 @@ export default function CanvasEditor() {
                   </>
                 )}
 
-                {(selectedElement.type === 'shape') && (
+                {selectedElement.type === 'barcode' && (
+                  <>
+                    <div>
+                      <label className="text-xs text-slate-400 block mb-1">条码内容</label>
+                      <input
+                        type="text"
+                        value={selectedElement.barcodeValue || ''}
+                        onChange={(e) => updateElement(selectedElement.id, { barcodeValue: e.target.value })}
+                        className="input-field !py-1.5 text-sm"
+                        placeholder="支持 {{orderNo}} 变量"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs text-slate-400 block mb-1">条码格式</label>
+                      <select
+                        value={selectedElement.barcodeFormat || 'CODE128'}
+                        onChange={(e) => updateElement(selectedElement.id, { barcodeFormat: e.target.value })}
+                        className="input-field !py-1.5 text-sm"
+                      >
+                        <option value="CODE128">CODE128</option>
+                        <option value="EAN13">EAN-13</option>
+                        <option value="EAN8">EAN-8</option>
+                        <option value="UPC">UPC</option>
+                        <option value="CODE39">CODE39</option>
+                      </select>
+                    </div>
+                  </>
+                )}
+
+                {selectedElement.type === 'shape' && (
                   <div>
                     <label className="text-xs text-slate-400 block mb-1">填充颜色</label>
                     <div className="flex gap-2">

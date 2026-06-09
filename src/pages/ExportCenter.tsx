@@ -1,5 +1,8 @@
 import { useState } from 'react'
-import { useDesignStore } from '@/store/useDesignStore'
+import { useDesignStore, replacePlaceholders } from '@/store/useDesignStore'
+import { renderElementsToCanvas, canvasToPNG, canvasToJPG, downloadDataURL } from '@/utils/canvasRenderer'
+import { exportDesignToPDF, exportImpositionToPDF } from '@/utils/pdfExporter'
+import { generateBarcode } from '@/utils/canvasRenderer'
 import type { CanvasElement } from '@/types'
 
 export default function ExportCenter() {
@@ -72,20 +75,116 @@ export default function ExportCenter() {
               )
             }
 
+            if (element.type === 'barcode') {
+              const canvas = generateBarcode(
+                element.barcodeValue || '',
+                element.barcodeFormat || 'CODE128',
+                element.width * scale,
+                element.height * scale
+              )
+              const dataUrl = canvas ? canvas.toDataURL() : ''
+              return (
+                <div
+                  key={element.id}
+                  style={{
+                    ...baseStyle,
+                    backgroundColor: '#fff',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    overflow: 'hidden',
+                  }}
+                >
+                  {dataUrl && <img src={dataUrl} alt="barcode" style={{ width: '100%', height: '100%', objectFit: 'fill' }} />}
+                </div>
+              )
+            }
+
+            if (element.type === 'image') {
+              return (
+                <img
+                  key={element.id}
+                  src={element.src}
+                  alt=""
+                  style={{ ...baseStyle, objectFit: 'contain' }}
+                />
+              )
+            }
+
             return null
           })}
       </div>
     )
   }
 
+  const exportSingle = (els: CanvasElement[], suffix = '') => {
+    const ext = exportConfig.format
+    const filename = `design${suffix ? `_${suffix}` : ''}.${ext}`
+
+    if (ext === 'pdf') {
+      const dataUrl = exportConfig.imposition
+        ? exportImpositionToPDF(els, canvasState, exportConfig)
+        : exportDesignToPDF(els, canvasState, exportConfig)
+      downloadDataURL(dataUrl, filename)
+      return
+    }
+
+    const canvas = renderElementsToCanvas(
+      els,
+      { ...canvasState, exportDpi: exportConfig.dpi },
+      exportConfig.bleed > 0
+    )
+
+    if (exportConfig.imposition) {
+      const rows = exportConfig.impositionRows
+      const cols = exportConfig.impositionCols
+      const count = rows * cols
+      const w = canvas.width
+      const h = canvas.height
+      const gap = 4
+      const total = document.createElement('canvas')
+      total.width = cols * w + (cols + 1) * gap
+      total.height = rows * h + (rows + 1) * gap
+      const tctx = total.getContext('2d')!
+      tctx.fillStyle = '#ffffff'
+      tctx.fillRect(0, 0, total.width, total.height)
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          tctx.drawImage(canvas, gap + c * (w + gap), gap + r * (h + gap))
+        }
+      }
+      const dataUrl = ext === 'png'
+        ? total.toDataURL('image/png')
+        : total.toDataURL('image/jpeg', exportConfig.quality / 100)
+      downloadDataURL(dataUrl, filename)
+      return
+    }
+
+    const dataUrl = ext === 'png'
+      ? canvasToPNG(canvas)
+      : canvasToJPG(canvas, exportConfig.quality / 100)
+    downloadDataURL(dataUrl, filename)
+  }
+
   const handleExport = async () => {
     setExporting(true)
     setExportProgress(0)
-    const totalSteps = orderItems.length > 0 ? orderItems.length : 1
-    for (let i = 0; i < totalSteps; i++) {
+
+    if (orderItems.length > 0) {
+      for (let i = 0; i < orderItems.length; i++) {
+        const order = orderItems[i]
+        const replaced = replacePlaceholders(elements, order)
+        exportSingle(replaced, `${order.orderNo}_${order.customerName}`)
+        setExportProgress(Math.round(((i + 1) / orderItems.length) * 100))
+        await new Promise(r => setTimeout(r, 200))
+      }
+    } else {
+      exportSingle(elements)
+      setExportProgress(50)
       await new Promise(r => setTimeout(r, 300))
-      setExportProgress(Math.round(((i + 1) / totalSteps) * 100))
+      setExportProgress(100)
     }
+
     await new Promise(r => setTimeout(r, 500))
     setExporting(false)
   }
@@ -184,8 +283,11 @@ export default function ExportCenter() {
               )}
 
               <div className="flex justify-end gap-3">
-                <button className="btn-secondary">
-                  👁️ 全屏预览
+                <button
+                  className="btn-secondary"
+                  onClick={() => exportSingle(elements, 'preview')}
+                >
+                  👁️ 导出预览
                 </button>
                 <button
                   className="btn-primary text-lg !px-6 !py-3"
@@ -399,7 +501,10 @@ export default function ExportCenter() {
                     >
                       恢复
                     </button>
-                    <button className="btn-primary !py-1.5 text-sm justify-center">
+                    <button
+                      className="btn-primary !py-1.5 text-sm justify-center"
+                      onClick={() => exportSingle(version.elements, `v${version.version}`)}
+                    >
                       导出
                     </button>
                   </div>
