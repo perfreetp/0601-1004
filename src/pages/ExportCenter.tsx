@@ -1,9 +1,14 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { useDesignStore, replacePlaceholders } from '@/store/useDesignStore'
-import { renderElementsToCanvas, canvasToPNG, canvasToJPG, downloadDataURL } from '@/utils/canvasRenderer'
-import { exportDesignToPDF, exportImpositionToPDF } from '@/utils/pdfExporter'
-import { generateBarcode } from '@/utils/canvasRenderer'
-import type { CanvasElement } from '@/types'
+import {
+  renderElementsToCanvas,
+  canvasToPNG,
+  canvasToJPG,
+  saveOrDownload,
+  generateBarcode,
+} from '@/utils/canvasRenderer'
+import { exportDesignToPDF, exportImpositionToPDF, saveOrDownloadPDF } from '@/utils/pdfExporter'
+import type { CanvasElement, ExportConfig } from '@/types'
 
 export default function ExportCenter() {
   const {
@@ -19,21 +24,39 @@ export default function ExportCenter() {
   const [activeTab, setActiveTab] = useState<'export' | 'history'>('export')
   const [exporting, setExporting] = useState(false)
   const [exportProgress, setExportProgress] = useState(0)
+  const [lastSavedPath, setLastSavedPath] = useState<string>('')
 
-  const renderThumbnail = (els: CanvasElement[], w: number, h: number) => {
+  const bleedMm = exportConfig.bleed || 0
+
+  const renderThumbnail = (els: CanvasElement[], w: number, h: number, bleed: number = 0) => {
     const scale = 0.3
+    const mmToPx = 3.7795
+    const bleedPx = bleed * mmToPx * scale
+    const totalW = w * scale + bleedPx * 2
+    const totalH = h * scale + bleedPx * 2
     return (
       <div
-        className="relative bg-white"
-        style={{ width: w * scale, height: h * scale }}
+        className="relative bg-white border"
+        style={{ width: totalW, height: totalH }}
       >
+        {bleedPx > 0 && (
+          <div
+            className="absolute border-2 border-dashed border-red-400 pointer-events-none"
+            style={{
+              left: bleedPx,
+              top: bleedPx,
+              width: w * scale,
+              height: h * scale,
+            }}
+          />
+        )}
         {[...els]
           .sort((a, b) => a.zIndex - b.zIndex)
           .map((element) => {
             const baseStyle: React.CSSProperties = {
               position: 'absolute',
-              left: element.x * scale,
-              top: element.y * scale,
+              left: bleedPx + element.x * scale,
+              top: bleedPx + element.y * scale,
               width: element.width * scale,
               height: element.height * scale,
               transform: `rotate(${element.rotation}deg)`,
@@ -117,31 +140,35 @@ export default function ExportCenter() {
     )
   }
 
-  const exportSingle = (els: CanvasElement[], suffix = '') => {
-    const ext = exportConfig.format
+  const renderStateForExport = useMemo(
+    () => ({ ...canvasState, exportDpi: exportConfig.dpi }),
+    [canvasState, exportConfig.dpi]
+  )
+
+  const exportSingle = async (
+    els: CanvasElement[],
+    config: ExportConfig,
+    suffix = ''
+  ): Promise<string | null> => {
+    const ext = config.format
     const filename = `design${suffix ? `_${suffix}` : ''}.${ext}`
+    const localBleedMm = config.bleed || 0
 
     if (ext === 'pdf') {
-      const dataUrl = exportConfig.imposition
-        ? exportImpositionToPDF(els, canvasState, exportConfig)
-        : exportDesignToPDF(els, canvasState, exportConfig)
-      downloadDataURL(dataUrl, filename)
-      return
+      const dataUrl = config.imposition
+        ? exportImpositionToPDF(els, renderStateForExport, config)
+        : exportDesignToPDF(els, renderStateForExport, config)
+      return saveOrDownloadPDF(dataUrl, filename)
     }
 
-    const canvas = renderElementsToCanvas(
-      els,
-      { ...canvasState, exportDpi: exportConfig.dpi },
-      exportConfig.bleed > 0
-    )
+    const canvas = renderElementsToCanvas(els, renderStateForExport, localBleedMm > 0, localBleedMm)
 
-    if (exportConfig.imposition) {
-      const rows = exportConfig.impositionRows
-      const cols = exportConfig.impositionCols
-      const count = rows * cols
+    if (config.imposition) {
+      const rows = config.impositionRows
+      const cols = config.impositionCols
       const w = canvas.width
       const h = canvas.height
-      const gap = 4
+      const gap = Math.max(4, Math.round(4 * (exportConfig.dpi / 96)))
       const total = document.createElement('canvas')
       total.width = cols * w + (cols + 1) * gap
       total.height = rows * h + (rows + 1) * gap
@@ -155,37 +182,42 @@ export default function ExportCenter() {
       }
       const dataUrl = ext === 'png'
         ? total.toDataURL('image/png')
-        : total.toDataURL('image/jpeg', exportConfig.quality / 100)
-      downloadDataURL(dataUrl, filename)
-      return
+        : total.toDataURL('image/jpeg', config.quality / 100)
+      return saveOrDownload(dataUrl, filename)
     }
 
     const dataUrl = ext === 'png'
       ? canvasToPNG(canvas)
-      : canvasToJPG(canvas, exportConfig.quality / 100)
-    downloadDataURL(dataUrl, filename)
+      : canvasToJPG(canvas, config.quality / 100)
+    return saveOrDownload(dataUrl, filename)
   }
 
   const handleExport = async () => {
     setExporting(true)
     setExportProgress(0)
+    setLastSavedPath('')
 
-    if (orderItems.length > 0) {
-      for (let i = 0; i < orderItems.length; i++) {
-        const order = orderItems[i]
-        const replaced = replacePlaceholders(elements, order)
-        exportSingle(replaced, `${order.orderNo}_${order.customerName}`)
-        setExportProgress(Math.round(((i + 1) / orderItems.length) * 100))
+    try {
+      if (orderItems.length > 0) {
+        for (let i = 0; i < orderItems.length; i++) {
+          const order = orderItems[i]
+          const replaced = replacePlaceholders(elements, order)
+          await exportSingle(replaced, exportConfig, `${order.orderNo}_${order.customerName}`)
+          setExportProgress(Math.round(((i + 1) / orderItems.length) * 100))
+          await new Promise(r => setTimeout(r, 150))
+        }
+      } else {
+        const path = await exportSingle(elements, exportConfig)
+        setExportProgress(50)
+        if (path) setLastSavedPath(path)
         await new Promise(r => setTimeout(r, 200))
+        setExportProgress(100)
       }
-    } else {
-      exportSingle(elements)
-      setExportProgress(50)
-      await new Promise(r => setTimeout(r, 300))
-      setExportProgress(100)
+    } catch (e) {
+      console.error('导出失败', e)
     }
 
-    await new Promise(r => setTimeout(r, 500))
+    await new Promise(r => setTimeout(r, 800))
     setExporting(false)
   }
 
@@ -199,7 +231,10 @@ export default function ExportCenter() {
         <div className="flex items-center justify-between">
           <div>
             <h2 className="text-2xl font-bold text-white">导出中心</h2>
-            <p className="text-slate-400 mt-1">配置导出参数、拼版预览、下载文件</p>
+            <p className="text-slate-400 mt-1">
+              配置导出参数 · 出血 {bleedMm}mm · {exportConfig.dpi} DPI
+              {lastSavedPath && <span className="text-emerald-400 ml-3">✓ 已保存至 {lastSavedPath}</span>}
+            </p>
           </div>
           <div className="flex items-center gap-1 bg-dark-800 rounded-lg p-1 border border-dark-700">
             <button
@@ -231,7 +266,9 @@ export default function ExportCenter() {
           <div className="flex-1 overflow-auto p-8">
             <div className="max-w-4xl mx-auto">
               <div className="card p-6 mb-6">
-                <h3 className="font-semibold text-white mb-4">👁️ 拼版预览</h3>
+                <h3 className="font-semibold text-white mb-4">
+                  👁️ 拼版预览 {bleedMm > 0 && <span className="text-red-400 text-sm ml-2">（红色虚线为出血线 {bleedMm}mm）</span>}
+                </h3>
                 <div className="bg-dark-700/50 rounded-xl p-8 flex items-center justify-center overflow-auto">
                   {exportConfig.imposition ? (
                     <div
@@ -242,18 +279,20 @@ export default function ExportCenter() {
                     >
                       {Array.from({ length: impositionCount }).map((_, idx) => (
                         <div key={idx} className="border border-slate-200">
-                          {renderThumbnail(elements, canvasState.width, canvasState.height)}
+                          {renderThumbnail(elements, canvasState.width, canvasState.height, bleedMm)}
                         </div>
                       ))}
                     </div>
                   ) : (
                     <div className="p-4 bg-white rounded-lg shadow-lg">
-                      {renderThumbnail(elements, canvasState.width, canvasState.height)}
+                      {renderThumbnail(elements, canvasState.width, canvasState.height, bleedMm)}
                     </div>
                   )}
                 </div>
                 <div className="mt-4 flex flex-wrap items-center gap-4 text-sm text-slate-400">
                   <span>画布尺寸: {canvasState.width} × {canvasState.height} px</span>
+                  <span>•</span>
+                  <span>导出尺寸: {Math.round(canvasState.width * exportConfig.dpi / 96 + bleedMm * 2 * 3.78)} × {Math.round(canvasState.height * exportConfig.dpi / 96 + bleedMm * 2 * 3.78)} px</span>
                   <span>•</span>
                   <span>
                     拼版: {exportConfig.imposition
@@ -285,16 +324,16 @@ export default function ExportCenter() {
               <div className="flex justify-end gap-3">
                 <button
                   className="btn-secondary"
-                  onClick={() => exportSingle(elements, 'preview')}
+                  onClick={() => exportSingle(elements, { ...exportConfig, bleed: 0, dpi: 150 }, 'preview')}
                 >
-                  👁️ 导出预览
+                  👁️ 快速预览
                 </button>
                 <button
                   className="btn-primary text-lg !px-6 !py-3"
                   onClick={handleExport}
                   disabled={exporting}
                 >
-                  {exporting ? '⏳ 导出中...' : '📥 开始导出'}
+                  {exporting ? '⏳ 导出中...' : `📥 开始导出 ${exportConfig.format.toUpperCase()}`}
                 </button>
               </div>
             </div>
@@ -389,17 +428,22 @@ export default function ExportCenter() {
                   <div>
                     <div className="flex items-center justify-between mb-1.5">
                       <label className="text-sm text-slate-400">出血线大小</label>
-                      <span className="text-sm text-primary-400 font-mono">{exportConfig.bleed} mm</span>
+                      <span className="text-sm text-primary-400 font-mono">{bleedMm} mm</span>
                     </div>
                     <input
                       type="range"
                       min={0}
                       max={10}
                       step={1}
-                      value={exportConfig.bleed}
+                      value={bleedMm}
                       onChange={(e) => setExportConfig({ bleed: Number(e.target.value) })}
                       className="w-full accent-primary-500"
                     />
+                    <div className="flex justify-between text-xs text-slate-600 mt-1">
+                      <span>0 mm</span>
+                      <span>3 mm (常用)</span>
+                      <span>10 mm</span>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -479,7 +523,7 @@ export default function ExportCenter() {
                   <div
                     className="aspect-[3/2] rounded-lg overflow-hidden mb-4 bg-white flex items-center justify-center"
                   >
-                    {renderThumbnail(version.elements, 600, 400)}
+                    {renderThumbnail(version.elements, 600, 400, 0)}
                   </div>
                   <div className="flex items-start justify-between mb-2">
                     <div>
@@ -503,7 +547,7 @@ export default function ExportCenter() {
                     </button>
                     <button
                       className="btn-primary !py-1.5 text-sm justify-center"
-                      onClick={() => exportSingle(version.elements, `v${version.version}`)}
+                      onClick={() => exportSingle(version.elements, exportConfig, `v${version.version}`)}
                     >
                       导出
                     </button>

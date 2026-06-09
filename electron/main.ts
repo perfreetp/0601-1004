@@ -55,18 +55,32 @@ app.on('activate', () => {
 
 app.whenReady().then(createWindow)
 
-ipcMain.handle('save-file', async (_event, { defaultPath, content }) => {
+ipcMain.handle('save-file', async (_event, { defaultPath, dataUrl, buffer }) => {
   const result = await dialog.showSaveDialog({
     defaultPath,
     filters: [
+      { name: 'PNG 图片', extensions: ['png'] },
+      { name: 'JPG 图片', extensions: ['jpg', 'jpeg'] },
+      { name: 'PDF 文档', extensions: ['pdf'] },
       { name: 'All Files', extensions: ['*'] },
-      { name: 'Images', extensions: ['png', 'jpg', 'jpeg'] },
-      { name: 'PDF', extensions: ['pdf'] },
     ],
   })
   if (!result.canceled && result.filePath) {
-    fs.writeFileSync(result.filePath, content)
-    return result.filePath
+    try {
+      if (buffer) {
+        const uint8 = new Uint8Array(buffer)
+        fs.writeFileSync(result.filePath, uint8)
+      } else if (dataUrl) {
+        const commaIdx = dataUrl.indexOf(',')
+        const base64 = commaIdx >= 0 ? dataUrl.slice(commaIdx + 1) : dataUrl
+        const fileBuffer = Buffer.from(base64, 'base64')
+        fs.writeFileSync(result.filePath, fileBuffer)
+      }
+      return result.filePath
+    } catch (err) {
+      console.error('save-file error:', err)
+      return null
+    }
   }
   return null
 })

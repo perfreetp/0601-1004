@@ -1,6 +1,8 @@
 import { jsPDF } from 'jspdf'
 import type { CanvasElement, CanvasState, ExportConfig } from '@/types'
-import { renderElementsToCanvas } from './canvasRenderer'
+import { renderElementsToCanvas, saveOrDownload } from './canvasRenderer'
+
+const PX_TO_MM = 25.4 / 96
 
 export function exportDesignToPDF(
   elements: CanvasElement[],
@@ -11,7 +13,6 @@ export function exportDesignToPDF(
   const bleedMm = config.bleed || 0
   const widthPx = canvasState.width
   const heightPx = canvasState.height
-  const pxToMm = 25.4 / 96
   const dpiScale = (config.dpi || 300) / 96
 
   const widthMm = (widthPx / 96) * 25.4 + bleedMm * 2
@@ -24,26 +25,11 @@ export function exportDesignToPDF(
     format: [widthMm, heightMm],
   })
 
-  const canvas = renderElementsToCanvas(
-    elements,
-    { ...canvasState, exportDpi: config.dpi || 300 },
-    config.bleed > 0
-  )
+  const renderState = { ...canvasState, exportDpi: config.dpi || 300 }
+  const canvas = renderElementsToCanvas(elements, renderState, bleedMm > 0, bleedMm)
   const imgData = canvas.toDataURL('image/png')
-  const scaledWidthPx = widthPx * dpiScale
-  const scaledHeightPx = heightPx * dpiScale
 
-  pdf.addImage(
-    imgData,
-    'PNG',
-    0,
-    0,
-    widthMm,
-    heightMm,
-    undefined,
-    'FAST',
-    0
-  )
+  pdf.addImage(imgData, 'PNG', 0, 0, widthMm, heightMm, undefined, 'FAST', 0)
 
   const out = pdf.output('datauristring')
   return out as string
@@ -76,34 +62,25 @@ export function exportImpositionToPDF(
     format: [sheetWidthMm, sheetHeightMm],
   })
 
-  const canvas = renderElementsToCanvas(
-    elements,
-    { ...canvasState, exportDpi: config.dpi || 300 },
-    config.bleed > 0
-  )
+  const renderState = { ...canvasState, exportDpi: config.dpi || 300 }
+  const canvas = renderElementsToCanvas(elements, renderState, bleedMm > 0, bleedMm)
   const imgData = canvas.toDataURL('image/png')
-  const dpiScale = (config.dpi || 300) / 96
-  const scaledWidthPx = canvasState.width * dpiScale
-  const scaledHeightPx = canvasState.height * dpiScale
 
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
       const x = gapMm + c * (widthMm + gapMm)
       const y = gapMm + r * (heightMm + gapMm)
-      pdf.addImage(
-        imgData,
-        'PNG',
-        x,
-        y,
-        widthMm,
-        heightMm,
-        undefined,
-        'FAST',
-        0
-      )
+      pdf.addImage(imgData, 'PNG', x, y, widthMm, heightMm, undefined, 'FAST', 0)
     }
   }
 
   const out = pdf.output('datauristring')
   return out as string
+}
+
+export async function saveOrDownloadPDF(
+  dataUrl: string,
+  filename: string
+): Promise<string | null> {
+  return saveOrDownload(dataUrl, filename)
 }

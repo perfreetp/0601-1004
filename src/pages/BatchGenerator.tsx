@@ -1,7 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { useDesignStore, replacePlaceholders } from '@/store/useDesignStore'
-import { generateBarcode } from '@/utils/canvasRenderer'
-import { renderElementsToCanvas, canvasToPNG, downloadDataURL } from '@/utils/canvasRenderer'
+import { generateBarcode, renderElementsToCanvas, canvasToPNG, saveOrDownload } from '@/utils/canvasRenderer'
 import type { OrderItem, CanvasElement } from '@/types'
 
 const sampleOrders: OrderItem[] = [
@@ -12,12 +11,22 @@ const sampleOrders: OrderItem[] = [
   { id: '5', orderNo: 'DD20240201005', customerName: '陈思远', productName: '陶瓷手工杯', quantity: 2 },
 ]
 
+interface PreviewThumb {
+  orderId: string
+  orderNo: string
+  customerName: string
+  thumbDataUrl: string
+}
+
 export default function BatchGenerator() {
-  const { orderItems, importOrderItems, elements, addElement, canvasState } = useDesignStore()
+  const { orderItems, importOrderItems, elements, addElement, canvasState, exportConfig } = useDesignStore()
   const [barcodeValue, setBarcodeValue] = useState('123456789012')
   const [barcodeFormat, setBarcodeFormat] = useState('CODE128')
   const [previewOrder, setPreviewOrder] = useState<OrderItem | null>(null)
   const [generating, setGenerating] = useState(false)
+  const [exporting, setExporting] = useState(false)
+  const [exportProgress, setExportProgress] = useState(0)
+  const [previews, setPreviews] = useState<PreviewThumb[]>([])
   const barcodeContainerRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -33,8 +42,13 @@ export default function BatchGenerator() {
     }
   }, [barcodeValue, barcodeFormat])
 
+  useEffect(() => {
+    if (orderItems.length === 0) setPreviews([])
+  }, [orderItems.length])
+
   const handleImportSample = () => {
     importOrderItems(sampleOrders)
+    setPreviews([])
   }
 
   const handleImportCSV = async () => {
@@ -56,9 +70,11 @@ export default function BatchGenerator() {
           }
         })
         importOrderItems(items)
+        setPreviews([])
       }
     } else {
       importOrderItems(sampleOrders)
+      setPreviews([])
     }
   }
 
@@ -78,21 +94,76 @@ export default function BatchGenerator() {
     addElement(newElement)
   }
 
-  const handleBatchGenerate = async () => {
+  const generatePreviewThumbs = async () => {
     if (orderItems.length === 0) {
       alert('请先导入订单数据')
       return
     }
-    setGenerating(true)
-    for (let i = 0; i < orderItems.length; i++) {
-      const order = orderItems[i]
-      const replacedElements = replacePlaceholders(elements, order)
-      const canvas = renderElementsToCanvas(replacedElements, canvasState, true)
-      const dataURL = canvasToPNG(canvas)
-      downloadDataURL(dataURL, `${order.orderNo}_${order.customerName}.png`)
-      await new Promise(r => setTimeout(r, 200))
+    if (elements.length === 0) {
+      alert('画布中暂无设计内容，请先在画布编辑中添加元素')
+      return
     }
-    setGenerating(false)
+    setGenerating(true)
+    const result: PreviewThumb[] = []
+    try {
+      for (let i = 0; i < orderItems.length; i++) {
+        const order = orderItems[i]
+        const replacedElements = replacePlaceholders(elements, order)
+        const renderState = { ...canvasState, exportDpi: 150 }
+        const canvas = renderElementsToCanvas(replacedElements, renderState, false, 0)
+        const thumbCanvas = document.createElement('canvas')
+        const thumbW = 240
+        const scale = thumbW / canvas.width
+        const thumbH = Math.round(canvas.height * scale)
+        thumbCanvas.width = thumbW
+        thumbCanvas.height = thumbH
+        const tctx = thumbCanvas.getContext('2d')!
+        tctx.fillStyle = '#ffffff'
+        tctx.fillRect(0, 0, thumbW, thumbH)
+        tctx.drawImage(canvas, 0, 0, thumbW, thumbH)
+        const dataUrl = thumbCanvas.toDataURL('image/png', 0.8)
+        result.push({
+          orderId: order.id,
+          orderNo: order.orderNo,
+          customerName: order.customerName,
+          thumbDataUrl: dataUrl,
+        })
+        await new Promise(r => setTimeout(r, 30))
+      }
+      setPreviews(result)
+    } catch (e) {
+      console.error('预览生成失败', e)
+      alert('预览生成失败，请重试')
+    } finally {
+      setGenerating(false)
+    }
+  }
+
+  const handleBatchExport = async () => {
+    if (previews.length === 0) {
+      alert('请先生成预览并确认无误后再导出')
+      return
+    }
+    setExporting(true)
+    setExportProgress(0)
+    const bleedMm = exportConfig.bleed || 0
+    const renderState = { ...canvasState, exportDpi: exportConfig.dpi || 300 }
+
+    try {
+      for (let i = 0; i < orderItems.length; i++) {
+        const order = orderItems[i]
+        const replacedElements = replacePlaceholders(elements, order)
+        const canvas = renderElementsToCanvas(replacedElements, renderState, bleedMm > 0, bleedMm)
+        const dataURL = canvasToPNG(canvas)
+        await saveOrDownload(dataURL, `${order.orderNo}_${order.customerName}.png`)
+        setExportProgress(Math.round(((i + 1) / orderItems.length) * 100))
+        await new Promise(r => setTimeout(r, 120))
+      }
+    } catch (e) {
+      console.error('批量导出失败', e)
+    }
+    await new Promise(r => setTimeout(r, 500))
+    setExporting(false)
   }
 
   const placeholders = new Set<string>()
@@ -109,7 +180,12 @@ export default function BatchGenerator() {
         <div className="flex items-center justify-between">
           <div>
             <h2 className="text-2xl font-bold text-white">批量生成</h2>
-            <p className="text-slate-400 mt-1">导入订单数据，批量替换变量并生成条码</p>
+            <p className="text-slate-400 mt-1">
+              导入订单数据 · 批量替换变量 · 预览确认 · 批量导出
+              {previews.length > 0 && (
+                <span className="text-emerald-400 ml-3">✓ 已生成 {previews.length} 份预览</span>
+              )}
+            </p>
           </div>
           <div className="flex gap-2">
             <button className="btn-secondary" onClick={handleImportCSV}>
@@ -119,28 +195,60 @@ export default function BatchGenerator() {
               📋 导入示例数据
             </button>
             <button
-              className="btn-primary"
-              onClick={handleBatchGenerate}
-              disabled={generating}
+              className="btn-secondary"
+              onClick={generatePreviewThumbs}
+              disabled={generating || orderItems.length === 0}
             >
-              {generating ? '⏳ 生成中...' : '🚀 开始批量生成'}
+              {generating ? '⏳ 生成预览中...' : '🖼️ 生成预览'}
+            </button>
+            <button
+              className="btn-primary"
+              onClick={handleBatchExport}
+              disabled={exporting || previews.length === 0}
+            >
+              {exporting ? `⏳ 导出中 ${exportProgress}%` : '🚀 确认批量导出'}
             </button>
           </div>
         </div>
       </header>
 
+      {exporting && (
+        <div className="px-8 py-3 bg-primary-600/10 border-b border-primary-600/30">
+          <div className="flex items-center justify-between mb-1.5 max-w-xl">
+            <span className="text-sm text-primary-300">正在导出 {orderItems.length} 份文件...</span>
+            <span className="text-sm text-primary-400 font-mono">{exportProgress}%</span>
+          </div>
+          <div className="h-1.5 bg-dark-700 rounded-full overflow-hidden max-w-xl">
+            <div
+              className="h-full bg-gradient-to-r from-primary-500 to-primary-400 transition-all duration-300"
+              style={{ width: `${exportProgress}%` }}
+            />
+          </div>
+        </div>
+      )}
+
       <div className="flex-1 flex overflow-hidden">
         <div className="flex-1 overflow-hidden flex flex-col">
           <div className="px-8 py-4 border-b border-dark-700 flex items-center justify-between">
-            <h3 className="font-semibold text-white">订单清单 ({orderItems.length} 条)</h3>
+            <h3 className="font-semibold text-white">
+              {previews.length > 0 ? `成品预览 (${previews.length} 份，点击可放大查看)` : `订单清单 (${orderItems.length} 条)`}
+            </h3>
             <div className="flex gap-2">
+              {previews.length > 0 && (
+                <button
+                  className="text-sm text-slate-400 hover:text-slate-200"
+                  onClick={() => setPreviews([])}
+                >
+                  ↩ 返回订单列表
+                </button>
+              )}
               <span className="px-3 py-1 bg-primary-600/20 text-primary-400 rounded-full text-sm">
                 模板变量: {placeholders.size > 0 ? Array.from(placeholders).join(', ') : '暂无 (请在画布中添加 {{name}} 等变量)'}
               </span>
             </div>
           </div>
 
-          <div className="flex-1 overflow-auto">
+          <div className="flex-1 overflow-auto p-6">
             {orderItems.length === 0 ? (
               <div className="h-full flex flex-col items-center justify-center text-center">
                 <span className="text-7xl mb-4">📦</span>
@@ -154,6 +262,37 @@ export default function BatchGenerator() {
                     DD20240201002,李雨晴,手绘明信片,1
                   </code>
                 </div>
+              </div>
+            ) : previews.length > 0 ? (
+              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-5">
+                {previews.map((p, idx) => {
+                  const order = orderItems.find(o => o.id === p.orderId)
+                  return (
+                    <div
+                      key={p.orderId}
+                      className="card p-3 hover:border-primary-500/50 transition-all cursor-pointer group"
+                      onClick={() => order && setPreviewOrder(order)}
+                    >
+                      <div className="aspect-square bg-white rounded-lg overflow-hidden mb-3 flex items-center justify-center border border-slate-100">
+                        <img
+                          src={p.thumbDataUrl}
+                          alt={`预览 ${idx + 1}`}
+                          className="max-w-full max-h-full object-contain group-hover:scale-105 transition-transform"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs text-slate-500">#{idx + 1}</span>
+                          <span className="text-xs font-mono text-primary-400">{p.orderNo}</span>
+                        </div>
+                        <p className="text-sm text-slate-200 font-medium truncate">{p.customerName}</p>
+                        {order && (
+                          <p className="text-xs text-slate-500 truncate">{order.productName} ×{order.quantity}</p>
+                        )}
+                      </div>
+                    </div>
+                  )
+                })}
               </div>
             ) : (
               <table className="w-full">
@@ -258,6 +397,27 @@ export default function BatchGenerator() {
               )}
             </div>
           </div>
+
+          {previews.length > 0 && (
+            <div className="p-5 border-t border-dark-700">
+              <div className="card p-4 bg-emerald-600/10 border-emerald-600/30">
+                <div className="flex items-center gap-2 mb-2">
+                  <span>✅</span>
+                  <span className="text-sm text-emerald-300 font-medium">预览已生成</span>
+                </div>
+                <p className="text-xs text-slate-400 mb-3">
+                  已为 {previews.length} 条订单生成成品预览，点击卡片可放大查看姓名和订单号是否正确
+                </p>
+                <button
+                  className="w-full btn-primary justify-center !py-2 text-sm"
+                  onClick={handleBatchExport}
+                  disabled={exporting}
+                >
+                  {exporting ? `⏳ 导出中 ${exportProgress}%` : '🚀 批量导出 PNG'}
+                </button>
+              </div>
+            </div>
+          )}
         </aside>
       </div>
 
@@ -267,7 +427,7 @@ export default function BatchGenerator() {
           onClick={() => setPreviewOrder(null)}
         >
           <div
-            className="card p-6 max-w-2xl w-full max-h-full overflow-auto"
+            className="card p-6 max-w-4xl w-full max-h-full overflow-auto"
             onClick={e => e.stopPropagation()}
           >
             <div className="flex items-center justify-between mb-4">
@@ -291,11 +451,22 @@ export default function BatchGenerator() {
             </div>
             <div className="flex justify-end gap-2 mt-4">
               <button
+                className="btn-secondary"
+                onClick={() => setPreviewOrder(null)}
+              >
+                关闭
+              </button>
+              <button
                 className="btn-primary"
-                onClick={() => {
+                onClick={async () => {
                   const replaced = replacePlaceholders(elements, previewOrder)
-                  const cvs = renderElementsToCanvas(replaced, canvasState, true)
-                  downloadDataURL(canvasToPNG(cvs), `${previewOrder.orderNo}_${previewOrder.customerName}.png`)
+                  const cvs = renderElementsToCanvas(
+                    replaced,
+                    { ...canvasState, exportDpi: exportConfig.dpi },
+                    exportConfig.bleed > 0,
+                    exportConfig.bleed
+                  )
+                  await saveOrDownload(canvasToPNG(cvs), `${previewOrder.orderNo}_${previewOrder.customerName}.png`)
                 }}
               >
                 📥 下载此订单
@@ -311,7 +482,7 @@ export default function BatchGenerator() {
 function OrderPreview({ order }: { order: OrderItem }) {
   const { elements, canvasState } = useDesignStore()
   const replaced = replacePlaceholders(elements, order)
-  const previewScale = 0.6
+  const previewScale = Math.min(700 / canvasState.width, 500 / canvasState.height, 1)
 
   return (
     <div

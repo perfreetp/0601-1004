@@ -1,13 +1,13 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
 contextBridge.exposeInMainWorld('electronAPI', {
-  saveFile: (defaultPath: string, content: string) =>
-    ipcRenderer.invoke('save-file', { defaultPath, content }),
+  saveFile: (args: { defaultPath: string; dataUrl?: string; buffer?: ArrayBuffer }) =>
+    ipcRenderer.invoke('save-file', args),
   openFile: () => ipcRenderer.invoke('open-file'),
 })
 
 export interface ElectronAPI {
-  saveFile: (defaultPath: string, content: string) => Promise<string | null>
+  saveFile: (args: { defaultPath: string; dataUrl?: string; buffer?: ArrayBuffer }) => Promise<string | null>
   openFile: () => Promise<{ filePath: string; content: string } | null>
 }
 
