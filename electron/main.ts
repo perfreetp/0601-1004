@@ -85,6 +85,30 @@ ipcMain.handle('save-file', async (_event, { defaultPath, dataUrl, buffer }) => 
   return null
 })
 
+ipcMain.handle('save-files', async (_event, items: { filename: string; buffer: ArrayBuffer }[]) => {
+  const folderResult = await dialog.showOpenDialog({
+    title: '选择保存文件夹',
+    properties: ['openDirectory', 'promptToCreate'],
+  })
+  if (folderResult.canceled || !folderResult.filePaths || folderResult.filePaths.length === 0) {
+    return { saved: 0, folder: null }
+  }
+  const folder = folderResult.filePaths[0]
+  let saved = 0
+  for (const it of items) {
+    try {
+      const safeName = it.filename.replace(/[\\/:*?"<>|]/g, '_')
+      const filePath = path.join(folder, safeName)
+      const uint8 = new Uint8Array(it.buffer)
+      fs.writeFileSync(filePath, uint8)
+      saved++
+    } catch (err) {
+      console.error('save-files item error:', it.filename, err)
+    }
+  }
+  return { saved, folder }
+})
+
 ipcMain.handle('open-file', async () => {
   const result = await dialog.showOpenDialog({
     properties: ['openFile'],

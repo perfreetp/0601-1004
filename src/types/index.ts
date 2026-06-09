@@ -91,6 +91,7 @@ export interface ExportConfig {
   imposition: boolean
   impositionRows: number
   impositionCols: number
+  pdfMode: 'single' | 'imposition' | 'multi'
 }
 
 export interface CanvasState {

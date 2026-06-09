@@ -119,6 +119,7 @@ const defaultExportConfig: ExportConfig = {
   imposition: false,
   impositionRows: 2,
   impositionCols: 3,
+  pdfMode: 'single',
 }
 
 function getInitialState() {

@@ -1,7 +1,36 @@
 import type { CanvasElement, CanvasState } from '@/types'
 import JsBarcode from 'jsbarcode'
 
-const MM_TO_PX_96DPI = 3.7795275591
+export const MM_TO_PX_96DPI = 25.4 / 96
+
+export function pxFromMm(mm: number, dpi: number = 96): number {
+  return (mm / 25.4) * dpi
+}
+
+export function canvasExportPixelSize(
+  canvasState: CanvasState,
+  bleedMm: number = 0,
+  dpi?: number
+): { widthPx: number; heightPx: number; bleedPx: number } {
+  const targetDpi = dpi || canvasState.exportDpi || 300
+  const dpr = targetDpi / 96
+  const bleedPx = bleedMm > 0 ? pxFromMm(bleedMm, targetDpi) : 0
+  return {
+    widthPx: Math.round(canvasState.width * dpr + bleedPx * 2),
+    heightPx: Math.round(canvasState.height * dpr + bleedPx * 2),
+    bleedPx: Math.round(bleedPx),
+  }
+}
+
+export function canvasExportMmSize(
+  canvasState: CanvasState,
+  bleedMm: number = 0
+): { widthMm: number; heightMm: number } {
+  return {
+    widthMm: (canvasState.width / 96) * 25.4 + bleedMm * 2,
+    heightMm: (canvasState.height / 96) * 25.4 + bleedMm * 2,
+  }
+}
 
 export function renderElementsToCanvas(
   elements: CanvasElement[],
@@ -9,48 +38,51 @@ export function renderElementsToCanvas(
   includeBleed: boolean = true,
   bleedMm: number = 0
 ): HTMLCanvasElement {
-  const canvas = document.createElement('canvas')
   const targetDpi = canvasState.exportDpi || 300
   const dpr = Math.max(1, targetDpi / 96)
-  const bleedPx = includeBleed && bleedMm > 0 ? bleedMm * MM_TO_PX_96DPI * dpr : 0
-  const w = canvasState.width * dpr + bleedPx * 2
-  const h = canvasState.height * dpr + bleedPx * 2
-  canvas.width = w
-  canvas.height = h
-  const ctx = canvas.getContext('2d')!
+  const size = canvasExportPixelSize(canvasState, includeBleed ? bleedMm : 0, targetDpi)
+  const bleedPx = size.bleedPx
 
-  ctx.scale(1, 1)
+  const canvas = document.createElement('canvas')
+  canvas.width = size.widthPx
+  canvas.height = size.heightPx
+  const ctx = canvas.getContext('2d')!
+  ctx.imageSmoothingEnabled = true
+  ctx.imageSmoothingQuality = 'high'
+
   ctx.fillStyle = canvasState.backgroundColor || '#ffffff'
-  ctx.fillRect(0, 0, w, h)
+  ctx.fillRect(0, 0, size.widthPx, size.heightPx)
 
   if (includeBleed && bleedPx > 0) {
+    ctx.save()
     ctx.strokeStyle = 'rgba(255, 0, 0, 0.6)'
     ctx.setLineDash([8 * dpr, 4 * dpr])
-    ctx.lineWidth = Math.max(1, 1 * dpr)
+    ctx.lineWidth = Math.max(1, Math.round(1 * dpr))
     ctx.strokeRect(
       bleedPx + 0.5,
       bleedPx + 0.5,
-      canvasState.width * dpr - 1,
-      canvasState.height * dpr - 1
+      size.widthPx - bleedPx * 2 - 1,
+      size.heightPx - bleedPx * 2 - 1
     )
-    ctx.setLineDash([])
+    ctx.restore()
   }
 
   const sorted = [...elements].sort((a, b) => a.zIndex - b.zIndex)
   for (const el of sorted) {
-    ctx.save()
-    const ew = el.width * dpr
-    const eh = el.height * dpr
+    const ew = Math.max(1, el.width * dpr)
+    const eh = Math.max(1, el.height * dpr)
     const ex = bleedPx + el.x * dpr
     const ey = bleedPx + el.y * dpr
+
+    ctx.save()
     const cx = ex + ew / 2
     const cy = ey + eh / 2
     ctx.translate(cx, cy)
-    ctx.rotate((el.rotation || 0) * Math.PI / 180)
+    ctx.rotate(((el.rotation || 0) * Math.PI) / 180)
     ctx.translate(-cx, -cy)
 
     if (el.type === 'shape') {
-      ctx.fillStyle = el.fill || '#000'
+      ctx.fillStyle = el.fill || '#000000'
       if (el.shapeType === 'circle') {
         ctx.beginPath()
         ctx.ellipse(ex + ew / 2, ey + eh / 2, ew / 2, eh / 2, 0, 0, Math.PI * 2)
@@ -59,27 +91,9 @@ export function renderElementsToCanvas(
         ctx.fillRect(ex, ey, ew, eh)
       }
     } else if (el.type === 'text') {
-      ctx.fillStyle = el.color || '#000'
-      const fontSizePx = (el.fontSize || 16) * dpr
-      ctx.font = `${el.fontWeight || 'normal'} ${fontSizePx}px ${el.fontFamily || 'sans-serif'}`
-      ctx.textBaseline = 'top'
-      const align = el.textAlign || 'left'
-      if (align === 'center') {
-        ctx.textAlign = 'center'
-        drawMultilineText(ctx, el.content || '', ex + ew / 2, ey, ew, eh, fontSizePx)
-      } else if (align === 'right') {
-        ctx.textAlign = 'right'
-        drawMultilineText(ctx, el.content || '', ex + ew, ey, ew, eh, fontSizePx)
-      } else {
-        ctx.textAlign = 'left'
-        drawMultilineText(ctx, el.content || '', ex, ey, ew, eh, fontSizePx)
-      }
+      drawScaledText(ctx, el, ex, ey, ew, eh, dpr)
     } else if (el.type === 'image' && el.src) {
-      const img = document.createElement('img')
-      img.src = el.src
-      if (img.complete) {
-        ctx.drawImage(img, ex, ey, ew, eh)
-      }
+      drawScaledImage(ctx, el.src, ex, ey, ew, eh)
     } else if (el.type === 'barcode' && el.barcodeValue) {
       const barcodeCanvas = generateBarcode(el.barcodeValue, el.barcodeFormat || 'CODE128', ew, eh)
       if (barcodeCanvas) {
@@ -92,46 +106,100 @@ export function renderElementsToCanvas(
   return canvas
 }
 
-function drawMultilineText(
+function drawScaledText(
   ctx: CanvasRenderingContext2D,
-  text: string,
-  x: number,
-  y: number,
-  _maxWidth: number,
-  _maxHeight: number,
-  fontSize: number
+  el: CanvasElement,
+  ex: number,
+  ey: number,
+  ew: number,
+  eh: number,
+  dpr: number
 ) {
-  const lines = text.split('\n')
-  const lineHeight = fontSize * 1.3
+  const fontSizePx = Math.max(6, Math.round((el.fontSize || 16) * dpr))
+  const fontWeight = el.fontWeight || 'normal'
+  const fontFamily = el.fontFamily || 'sans-serif'
+  ctx.fillStyle = el.color || '#000000'
+  ctx.font = `${fontWeight} ${fontSizePx}px ${fontFamily}`
+  ctx.textBaseline = 'alphabetic'
+
+  const textAlign = el.textAlign || 'left'
+  if (textAlign === 'center') ctx.textAlign = 'center'
+  else if (textAlign === 'right') ctx.textAlign = 'right'
+  else ctx.textAlign = 'left'
+
+  const lines = (el.content || '').split('\n')
+  const lineHeightPx = fontSizePx * 1.3
+  const totalTextH = lines.length * lineHeightPx
+  let textX = ex
+  if (textAlign === 'center') textX = ex + ew / 2
+  else if (textAlign === 'right') textX = ex + ew
+
+  const verticalOffset = Math.max(0, (eh - totalTextH) / 2)
+  const startY = ey + verticalOffset
+
   lines.forEach((line, i) => {
-    ctx.fillText(line, x, y + i * lineHeight)
+    ctx.fillText(line, textX, startY + i * lineHeightPx + fontSizePx * 0.85)
   })
 }
 
-export function generateBarcode(value: string, format: string, width: number, height: number): HTMLCanvasElement | null {
+function drawScaledImage(
+  ctx: CanvasRenderingContext2D,
+  src: string,
+  ex: number,
+  ey: number,
+  ew: number,
+  eh: number
+) {
+  try {
+    const img = new Image()
+    img.src = src
+    if (img.complete && img.naturalWidth > 0) {
+      ctx.drawImage(img, ex, ey, ew, eh)
+    } else {
+      ctx.fillStyle = '#f1f5f9'
+      ctx.fillRect(ex, ey, ew, eh)
+      ctx.fillStyle = '#94a3b8'
+      ctx.font = `${Math.round(Math.min(ew, eh) * 0.15)}px sans-serif`
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
+      ctx.fillText('🖼️', ex + ew / 2, ey + eh / 2)
+    }
+  } catch (_) {
+    ctx.fillStyle = '#f1f5f9'
+    ctx.fillRect(ex, ey, ew, eh)
+  }
+}
+
+export function generateBarcode(
+  value: string,
+  format: string,
+  width: number,
+  height: number
+): HTMLCanvasElement | null {
   if (!value) return null
   const canvas = document.createElement('canvas')
   try {
     const dprGuess = width > 400 ? 2 : 1
-    canvas.width = Math.max(40, width * dprGuess)
-    canvas.height = Math.max(40, height * dprGuess)
+    canvas.width = Math.max(80, Math.floor(width * dprGuess))
+    canvas.height = Math.max(40, Math.floor(height * dprGuess))
     const ctx = canvas.getContext('2d')!
-    ctx.scale(1, 1)
     ctx.fillStyle = '#ffffff'
     ctx.fillRect(0, 0, canvas.width, canvas.height)
 
+    const barWidth = Math.max(1, Math.floor(width / Math.max(20, value.length * 2.5 + 10)))
     JsBarcode(canvas, value, {
       format: (format as any) || 'CODE128',
-      width: Math.max(1, Math.floor(width / Math.max(20, value.length * 2 + 10))),
-      height: Math.max(30, height * 0.7),
+      width: barWidth,
+      height: Math.max(20, height * 0.7),
       displayValue: true,
       fontSize: Math.max(8, Math.floor(height * 0.2)),
-      margin: 4,
+      margin: Math.max(2, Math.floor(width * 0.02)),
       background: '#ffffff',
       lineColor: '#000000',
     })
     return canvas
   } catch (e) {
+    console.warn('barcode failed:', e)
     return null
   }
 }
@@ -205,4 +273,29 @@ export async function saveOrDownload(dataURL: string, filename: string): Promise
     downloadDataURL(dataURL, filename)
     return null
   }
+}
+
+export interface BatchSaveItem {
+  filename: string
+  dataUrl: string
+}
+
+export async function saveOrDownloadBatch(items: BatchSaveItem[]): Promise<{ saved: number; folder?: string | null }> {
+  if (window.electronAPI?.saveFiles) {
+    try {
+      const prepared = items.map(it => ({
+        filename: it.filename,
+        buffer: dataURLtoArrayBuffer(it.dataUrl),
+      }))
+      const result = await window.electronAPI.saveFiles(prepared)
+      return { saved: result?.saved || 0, folder: result?.folder || null }
+    } catch (e) {
+      console.warn('Electron batch save failed, falling back to downloads:', e)
+    }
+  }
+  for (let i = 0; i < items.length; i++) {
+    downloadDataURL(items[i].dataUrl, items[i].filename)
+    await new Promise(r => setTimeout(r, 80))
+  }
+  return { saved: items.length }
 }
